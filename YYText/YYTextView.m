@@ -89,6 +89,7 @@ typedef NS_ENUM(NSUInteger, YYTextMoveDirection) {
 };
 
 
+
 /// An object that captures the state of the text view. Used for undo and redo.
 @interface _YYTextViewUndoObject : NSObject
 @property (nonatomic, strong) NSAttributedString *text;
@@ -178,6 +179,10 @@ typedef NS_ENUM(NSUInteger, YYTextMoveDirection) {
         
         unsigned int insideUndoBlock : 1;
         unsigned int firstResponderBeforeUndoAlert : 1;
+        unsigned int trackingDeleteBackward : 1;  ///< track deleteBackward operation
+        unsigned int trackingTouchBegan : 1;  /// < track touchesBegan event
+
+
     } _state;
 }
 
@@ -340,8 +345,15 @@ typedef NS_ENUM(NSUInteger, YYTextMoveDirection) {
             [[YYTextEffectWindow sharedWindow] showSelectionDot:_selectionView];
         });
     }
-    [[YYTextEffectWindow sharedWindow] showSelectionDot:_selectionView];
-    
+     if (@available(iOS 13.0, *)) {
+            if (_state.trackingTouchBegan) [_inputDelegate selectionWillChange:self];
+            [[YYTextEffectWindow sharedWindow] showSelectionDot:_selectionView];
+            if (_state.trackingTouchBegan) [_inputDelegate selectionDidChange:self];
+        }else{
+             [[YYTextEffectWindow sharedWindow] showSelectionDot:_selectionView];
+        }
+
+
     if (containsDot) {
         [self _startSelectionDotFixTimer];
     } else {
@@ -1421,13 +1433,23 @@ typedef NS_ENUM(NSUInteger, YYTextMoveDirection) {
 /// Replace the range with the text, and change the `_selectTextRange`.
 /// The caller should make sure the `range` and `text` are valid before call this method.
 - (void)_replaceRange:(YYTextRange *)range withText:(NSString *)text notifyToDelegate:(BOOL)notify{
-    if (NSEqualRanges(range.asRange, _selectedTextRange.asRange)) {
-        if (notify) [_inputDelegate selectionWillChange:self];
-        NSRange newRange = NSMakeRange(0, 0);
-        newRange.location = _selectedTextRange.start.offset + text.length;
-        _selectedTextRange = [YYTextRange rangeWithRange:newRange];
-        if (notify) [_inputDelegate selectionDidChange:self];
-    } else {
+    
+
+        if (NSEqualRanges(range.asRange, _selectedTextRange.asRange)) {
+            //这里的代理方法需要注释掉 【废止】
+            //if (notify) [_inputDelegate selectionWillChange:self];
+            /// iOS13 下，双光标问题 便是由此而生。
+            if (_state.trackingDeleteBackward)[_inputDelegate selectionWillChange:self];
+            NSRange newRange = NSMakeRange(0, 0);
+            newRange.location = _selectedTextRange.start.offset + text.length;
+            _selectedTextRange = [YYTextRange rangeWithRange:newRange];
+            //if (notify) [_inputDelegate selectionDidChange:self];
+            /// iOS13 下，双光标问题 便是由此而生。
+            if (_state.trackingDeleteBackward) [_inputDelegate selectionDidChange:self];
+            ///恢复标记
+            _state.trackingDeleteBackward = NO;
+        } else {
+
         if (range.asRange.length != text.length) {
             if (notify) [_inputDelegate selectionWillChange:self];
             NSRange unionRange = NSIntersectionRange(_selectedTextRange.asRange, range.asRange);
@@ -2026,6 +2048,23 @@ typedef NS_ENUM(NSUInteger, YYTextMoveDirection) {
     
     self.isAccessibilityElement = YES;
 }
+
+/// 方法重写
+- (void)addSubview:(UIView *)view{
+    [super addSubview:view];
+
+    Class Cls_selectionView = NSClassFromString(@"UITextSelectionView");
+    Class Cls_selectionGrabberDot = NSClassFromString(@"UISelectionGrabberDot");
+    if ([view isKindOfClass:[Cls_selectionGrabberDot class]]) {
+        view.layer.contents = [UIView new];
+    }
+
+    if ([view isKindOfClass:[Cls_selectionView class]]) {
+        view.hidden = YES;
+    }
+}
+
+
 
 #pragma mark - Public
 
@@ -3236,6 +3275,9 @@ typedef NS_ENUM(NSUInteger, YYTextMoveDirection) {
 }
 
 - (void)deleteBackward {
+    //标识出删除动作：用于解决双光标相关问题
+    _state.trackingDeleteBackward = YES;
+
     [self _updateIfNeeded];
     NSRange range = _selectedTextRange.asRange;
     if (range.location == 0 && range.length == 0) return;
